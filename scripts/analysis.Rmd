@@ -1,0 +1,1226 @@
+---
+title: "Linguistic Predictors of Concreteness"
+author: "Bodo Winter"
+date: "3/26/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This script analyzes several linguistic predictors of concreteness and abstractness:
+
+* part-of-speech
+* number of morphemes
+* count/mass distinction
+* etymology
+
+First, each linguistic factor will be analyzed separately; then they will be analyzed in a simultaneous regression analysis.
+
+Load in the data:
+
+```{r, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(car) # for variance inflation factors vif()
+library(broom) # for glance()
+library(rsq)
+library(gridExtra)
+library(textstem) # for lemmatize_strings()
+library(effsize)
+
+# Brysbaert concreteness ratings:
+
+conc <- read_csv('../data/brysbaert_concreteness.csv')
+
+# SUBTLEX POS Tags:
+
+SUBTL <- read_csv('../data/SUBTLEX_US_with_POS.csv')
+
+# ELP POS tags & ELP number of morphemes:
+
+ELP <- read_csv('../data/ELP_with_POS_cleaned.csv')
+
+# BECL countability data:
+
+BECL <- read_csv('../data/BECL.csv')
+
+# Etymologies:
+
+etym <- read_csv('../data/monaghan_roberts_etymologies.csv')
+
+# Load in morpholex data:
+
+morph <- read_csv('../data/morpholex_one_derivational_suffix.csv')
+nosuffix <- read_csv('../data/morpholex_no_suffix.csv')
+
+# Timo's beautiful ggplot2 theme:
+
+source('theme_timo.R')
+```
+
+## Preprocessing:
+
+Lemmatize all strings (get rid of inflectional morphology), except for -est, which we treat as derivational here given that's how it is treated in MorphoLex (see paper for discussion of -est).
+
+```{r}
+conc$Lemmas <- conc$Word
+ids <- !str_detect(conc$Word, 'est')
+conc[ids, ]$Lemmas <- lemmatize_strings(conc[ids, ]$Word)
+
+# Get rid of 'duplicates'
+
+conc <- filter(conc,
+               !duplicated(Lemmas))
+
+# Replace "Word" column with "lemma" column:
+
+conc <- mutate(conc,
+               Word = Lemmas)
+```
+
+Merge SUBTLEX POS and ELP data into conc:
+
+```{r}
+# SUBTLEX parts-of-speech tags:
+conc$SUBTL_POS <- SUBTL[match(conc$Word, SUBTL$Word), ]$Dom_PoS_SUBTLEX
+conc$SUBTL_percent <- SUBTL[match(conc$Word, SUBTL$Word), ]$Percentage_dom_PoS
+conc$SUBTL_allPOS <- SUBTL[match(conc$Word, SUBTL$Word), ]$All_PoS_SUBTLEX
+
+# ELP parts-of-speech tags:
+
+conc$ELP_POS <- ELP[match(conc$Word, ELP$Word), ]$POS
+
+# Number of letters from ELP:
+
+conc$Letters <- ELP[match(conc$Word, ELP$Word), ]$Length
+
+# Number of phonemes:
+
+conc$NPhon <- ELP[match(conc$Word, ELP$Word), ]$NPhon
+
+# Number of morphemes:
+
+conc$NMorph <- ELP[match(conc$Word, ELP$Word), ]$NMorph
+
+# Number of morphemes:
+
+conc$NMorph <- ELP[match(conc$Word, ELP$Word), ]$NMorph
+```
+
+Process etymologies... first clean the strings:
+
+```{r}
+etym <- filter(etym, word != '#NAME?')
+etym <- mutate(etym,
+               word = str_replace(word, '\\(.+\\)', ''),
+               word = str_trim(word),
+               word = str_to_lower(word))
+```
+
+Next, sort the labels:
+
+```{r}
+etym$Last <- str_split(etym$links, '%', simplify = TRUE)[, 1]
+```
+
+Match this into the concreteness file:
+
+```{r}
+conc$Etym <- etym[match(conc$Word, etym$word), ]$Last
+
+conc_counts <- conc %>% count(Etym, sort = TRUE) %>%
+  mutate(large = ifelse(n > 100, 'large', 'small')) %>%
+  filter(!is.na(Etym))
+
+conc$EtymSize <- conc_counts[match(conc$Etym, conc_counts$Etym), ]$large
+```
+
+Merge the following categories:
+
+- Proto-Germanic / Old English / Middle English = English/Germanic
+- Late Latin / Latin / Medieval Latin = Latin
+- Middle French / Old French / French / Anglo-French = French
+
+```{r}
+french <- c('Anglo-French', 'French', 'Middle French', 'Old French')
+latin <- c('Late Latin', 'Latin', 'Medieval Latin', 'Modern Latin')
+english <- c('Middle English', 'Old English', 'Proto-Germanic')
+other <- c('Greek', 'Italian', 'Old Norse')
+conc$EtymSimplified <- NA
+conc <- mutate(conc,
+               EtymSimplified = ifelse(Etym %in% french, 'French', EtymSimplified),
+               EtymSimplified = ifelse(Etym %in% latin,
+                                       'Latin', EtymSimplified),
+               EtymSimplified = ifelse(Etym %in% english,
+                                       'English', EtymSimplified),
+               EtymSimplified = ifelse(Etym %in% other, 'Other', EtymSimplified))
+```
+
+In a further step — this was requested by Francesca & Marianna, we will merge "Other" and "English", as the hypothesis is about French-based versus the rest.
+
+```{r}
+conc <- mutate(conc,
+               EtymSimplified = ifelse(EtymSimplified == 'English',
+                                       'Other', EtymSimplified))
+```
+
+Create a new 'function word' category:
+
+```{r}
+function_words <- c('Conjunction', 'Determiner',
+                    'Preposition', 'Pronoun', 'Article',
+                    'Ex', 'To', 'Not')
+conc <- mutate(conc,
+               SUBTL_POS = ifelse(SUBTL_POS %in% function_words,
+                                  'Function', SUBTL_POS))
+rm(function_words)
+```
+
+Set everything else NA:
+
+```{r}
+conc <- mutate(conc,
+               SUBTL_POS = ifelse(SUBTL_POS == '#N/A', NA, SUBTL_POS),
+               SUBTL_POS = ifelse(SUBTL_POS == 'Interjection', NA, SUBTL_POS),
+               SUBTL_POS = ifelse(SUBTL_POS == 'Letter', NA, SUBTL_POS),
+               SUBTL_POS = ifelse(SUBTL_POS == 'Name', NA, SUBTL_POS),
+               SUBTL_POS = ifelse(SUBTL_POS == 'Number', NA, SUBTL_POS),
+               SUBTL_POS = ifelse(SUBTL_POS == 'Unclassified', NA, SUBTL_POS))
+```
+
+Add morpheme parses (suffix info):
+
+```{r}
+conc$MorphParse <- morph[match(conc$Word, morph$Word), ]$MorphoLexSegm
+```
+
+Create a table of the morphemes:
+
+```{r}
+these_morphs <- c('>ly', '>y', '>er', '>ion', '>al', '>ness', '>ic',
+                  '>ate', '>able', '>est', '>ious', '>ity', '>ive',
+                  '>ant', '>ist', '>ize', '>less', '>ory', '>ory',
+                  '>ful', '>ance')
+suffixes <- c('-ly', '-y', '-er', '-ion', '-al', '-ness', '-ic',
+              '-ate', '-able', '-est', '-ious', '-ity', '-ive',
+              '-ant', '-ist', '-ize', '-less', '-ory', '-ory',
+              '-ful', '-ance')
+```
+
+Attach these to the concreteness dataset:
+
+```{r}
+conc$Suffix <- NA
+conc$Suffix <- as.character(conc$Suffix)
+
+for (i in 1:length(these_morphs)) {
+  this_morph <- these_morphs[i]
+  conc[which(str_detect(conc$MorphParse, this_morph)), ]$Suffix <- suffixes[i]
+}
+```
+
+Check:
+
+```{r}
+table(conc$Suffix)
+```
+
+Check words that have these suffixes versus words that do not.
+
+```{r}
+conc <- mutate(conc,
+               HasSuffix = ifelse(!is.na(Suffix), 'has suffix', 'no suffix'))
+```
+
+Since the 'suffix' parse is only for bimorphemic words, the 'no suffix' category needs to be set to NA for NMorph > 2.
+
+```{r}
+conc[which(conc$NMorph > 2), ]$HasSuffix <- NA
+```
+
+Create a "Suffix" column that also includes the no suffixes for plotting purposes:
+
+```{r}
+conc <- mutate(conc,
+               SuffixWithMono = ifelse(is.na(Suffix), 'monomorphemic', Suffix))
+conc[which(conc$NMorph > 1 & is.na(conc$Suffix)), ]$SuffixWithMono <- NA
+conc[which(is.na(conc$NMorph) & is.na(conc$Suffix)), ]$SuffixWithMono <- NA
+```
+
+Are standard deviations influenced by word knowledge?
+
+```{r}
+summary(lm(Conc.SD ~ Percent_known, data = conc))
+```
+
+Yes, but not massively so.
+
+Exclude words that were known by less than 95% of all people in the concreteness rating study. This makes sense because these data are probably noisy:
+
+```{r}
+# How much:
+
+sum(conc$Percent_known < 0.95) / nrow(conc)
+sum(conc$Percent_known < 0.95)
+
+# Exclude:
+
+conc <- filter(conc, Percent_known > 0.95)
+
+```
+
+A whopping 21% are excluded... or alternatively, 5820 data points.
+
+
+Get all compounds:
+
+```{r, message = FALSE, warning = FALSE}
+juhasz <- read_csv('../data/juhasz_lai_woodcock_2015.csv')
+LADEC <- read_csv('../data/LADECv1-2019.csv')
+kim <- read_csv('../data/kim_yap_goh_2019.csv')
+```
+
+Get all compound words into one big list:
+
+```{r}
+compounds <- c(juhasz$Compound, LADEC$stim, kim$CW)
+compounds <- unique(compounds)
+```
+
+Add a "is compound" variable to the conc data frame:
+
+```{r}
+conc <- mutate(conc,
+               IsCompound = ifelse(Word %in% compounds, 'Compound', 'No compound'))
+```
+
+Crete a subset with low SD items. Here I use an 50th percentile cut-off (median split), so the words with the 50% lowest SD. Other values would make sense too (feel free to change them) and don't affect the results vastly:
+
+```{r}
+conc_sub <- filter(conc,
+                   Conc.SD < quantile(Conc.SD, 0.5))
+nrow(conc_sub)
+nrow(conc) - nrow(conc_sub)
+1 - (nrow(conc_sub) / nrow(conc))
+```
+
+This excludes 11,481 data points.
+
+The analyses will be done with both datasets (all SDs allowed and low SD).
+
+## Linguistic factor 1: Part of speech:
+
+Only look at nouns, verbs and adjectives, SUBTLEX:
+
+```{r, fig.width = 10, fig.height = 6}
+POS <- c('Verb', 'Adjective', 'Noun', 'Adverb', 'Function')
+conc_red <- filter(conc,
+                   SUBTL_POS %in% POS)
+
+# Plot and aesthetics:
+
+conc_POS <- conc_red %>%
+  mutate(SUBTL_POS = factor(SUBTL_POS,
+                            levels = c('Adverb', 'Function', 'Adjective',
+                                       'Verb', 'Noun'))) %>% 
+  ggplot(aes(x = SUBTL_POS, y = Conc.M, fill = SUBTL_POS))
+
+# Geoms:
+
+conc_POS <- conc_POS + geom_boxplot()
+
+# Themes and other properties:
+
+conc_POS <- conc_POS +
+  labs(x = '', y = 'Concreteness\n') +
+  theme_timo +
+  theme(legend.position = 'none') + 
+  scale_fill_brewer(palette = 'Accent')
+
+# Look and save:
+
+conc_POS
+ggsave(plot = conc_POS, filename = '../figures/POS.pdf',
+       width = 8, height = 4.5)
+```
+
+Get the descriptive values for reporting:
+
+```{r}
+conc_red %>% group_by(SUBTL_POS) %>%
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            SD = round(SD, 2),
+            N = n()) %>% 
+  arrange(desc(M))
+```
+
+Nouns are a whopping 1 concreteness pint above adjectives, and about half a point above verbs.
+
+Make a model of this:
+
+```{r}
+xmdl <- lm(Conc.M ~ SUBTL_POS, conc_red)
+anova(xmdl)
+summary(xmdl)$r.squared
+```
+
+There is a significant effect of parts-of-speech, and it explains 19% of the variance in concreteness ratings!
+
+Repeat for low SD words:
+
+```{r}
+conc_red <- filter(conc_sub,
+                   SUBTL_POS %in% POS)
+xmdl <- lm(Conc.M ~ SUBTL_POS, conc_red)
+anova(xmdl)
+summary(xmdl)$r.squared
+```
+
+Also significant, explains 32% of the variance.
+
+Get the descriptive values for low SD words:
+
+```{r}
+conc_red %>% group_by(SUBTL_POS) %>%
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            N = n())
+```
+
+Basically the same pattern as before, but even more pronounced.
+
+Analysis of elastic words. First, check what elastic nouns there are most of, only for those that have at most two POS elasticity and at least 50 instances:
+
+```{r}
+conc %>% count(SUBTL_allPOS, sort = TRUE) %>%
+  filter(!is.na(SUBTL_allPOS)) %>% 
+  filter(str_count(SUBTL_allPOS, '\\.') == 1) %>% 
+  filter(n > 50) %>% 
+  print(n= Inf)
+```
+
+Recode them:
+
+```{r}
+conc <- mutate(conc,
+               Elasticity = ifelse(SUBTL_allPOS == 'Verb.Noun',
+                                   'Noun.Verb', SUBTL_allPOS),
+               Elasticity = ifelse(SUBTL_allPOS == 'Adjective.Noun',
+                                   'Noun.Adjective', Elasticity),
+               Elasticity = ifelse(SUBTL_allPOS == 'Adjective.Adverb',
+                                   'Adverb.Adjective', Elasticity),
+               Elasticity = ifelse(SUBTL_allPOS == 'Verb.Adjective',
+                                   'Adjective.Verb', Elasticity))
+```
+
+Extract elastics and non-elastics:
+
+```{r}
+elastics <- filter(conc,
+                   Elasticity %in% c('Noun.Verb', 'Noun.Adjective',
+                                     'Adverb.Adjective', 'Adjective.Verb',
+                                     'Noun', 'Adjective', 'Verb', 'Adverb'))
+```
+
+Get the averages:
+
+```{r}
+elastics %>% group_by(Elasticity) %>% 
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M)) %>% 
+  arrange(desc(M))
+```
+
+No clear tendency.
+
+Code percentage into continuous variable:
+
+```{r}
+conc <- mutate(conc,
+               SUBTL_percent = as.numeric(SUBTL_percent))
+```
+
+First, get the noun/verb ones, then the others etc.
+
+```{r}
+NV <- filter(conc,
+             SUBTL_allPOS %in% c('Noun.Verb', 'Verb.Noun'))
+AN <- filter(conc,
+             SUBTL_allPOS %in% c('Noun.Adjective', 'Adjective.Noun'))
+AV <- filter(conc,
+             SUBTL_allPOS %in% c('Verb.Adjective', 'Adjective.Verb'))
+AA <- filter(conc,
+             SUBTL_allPOS %in% c('Adjective.Adverb', 'Adverb.Adjective'))
+```
+
+Code them all so that the percentage is with respect to the more concrete category:
+
+```{r}
+NV[NV$SUBTL_allPOS == 'Verb.Noun', ]$SUBTL_percent <- 1 -
+  NV[NV$SUBTL_allPOS == 'Verb.Noun', ]$SUBTL_percent
+
+AN[AN$SUBTL_allPOS == 'Adjective.Noun', ]$SUBTL_percent <- 1 -
+  AN[AN$SUBTL_allPOS == 'Adjective.Noun', ]$SUBTL_percent
+
+AV[AV$SUBTL_allPOS == 'Adjective.Verb', ]$SUBTL_percent <- 1 -
+  AV[AV$SUBTL_allPOS == 'Adjective.Verb', ]$SUBTL_percent
+
+AA[AA$SUBTL_allPOS == 'Adverb.Adjective', ]$SUBTL_percent <- 1 -
+  AA[AA$SUBTL_allPOS == 'Adverb.Adjective', ]$SUBTL_percent
+```
+
+Assess this:
+
+```{r}
+with(NV, cor.test(SUBTL_percent, Conc.M))
+with(AN, cor.test(SUBTL_percent, Conc.M))
+with(AV, cor.test(SUBTL_percent, Conc.M))
+with(AA, cor.test(SUBTL_percent, Conc.M))
+```
+
+No clear pattern of results. It's not 100% clear what to make of the elasticity results.
+
+## Linguistic factor 2: Number of morphemes:
+
+Descriptive averages:
+
+```{r}
+conc %>% group_by(IsCompound) %>% 
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            SD = round(SD, 2))
+```
+
+Assess concreteness difference between compounds and non-compounds:
+
+```{r}
+with(conc, t.test(Conc.M ~ IsCompound, var.equal = TRUE))
+with(conc, cohen.d(Conc.M ~ IsCompound, var.equal = TRUE))
+```
+
+Compare this against monomorphemics:
+
+```{r}
+conc_comp <- filter(conc,
+                    !(IsCompound == 'No compound' & NMorph > 1))
+```
+
+Assess concreteness difference between compounds and non-compounds, for monomorphemics as comparison class:
+
+```{r}
+# Descriptive stats:
+
+conc_comp %>% group_by(IsCompound) %>% 
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            SD = round(SD, 2))
+
+# Inferential stats:
+
+with(conc_comp, t.test(Conc.M ~ IsCompound, var.equal = TRUE))
+with(conc_comp, cohen.d(Conc.M ~ IsCompound, var.equal = TRUE))
+```
+
+There are two ways of looking at morphological complexity. One is to look at specific suffixes (Table 1 in the paper).
+
+Get those from the database and exclude "-est", which is inflectional anyway and has such low numbers because of the lemmatization:
+
+```{r}
+conc_morph <- filter(conc,
+                     IsCompound != 'Compound',
+                     NMorph <= 2)
+conc_morph <- conc_morph[-which(conc_morph$Suffix == '-est'), ]
+```
+
+What about the suffix versus no suffix variable?
+
+```{r}
+conc_morph %>% 
+  group_by(HasSuffix) %>% 
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            SD = round(SD, 2))
+
+with(conc_morph, t.test(Conc.M ~ HasSuffix, var.equal = TRUE))
+with(conc_morph, cohen.d(Conc.M ~ HasSuffix, var.equal = TRUE))
+```
+
+Same for low SD dataset (-est does not occur in the low SD dataset):
+
+```{r}
+conc_sub %>% 
+  group_by(HasSuffix) %>% 
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            SD = round(SD, 2))
+
+with(conc_sub, t.test(Conc.M ~ HasSuffix))
+with(conc_sub, cohen.d(Conc.M ~ HasSuffix))
+```
+
+Descriptive values for reporting (NA is monomorphemic here):
+
+```{r}
+conc_morph %>% group_by(Suffix) %>%
+  summarize(M = round(mean(Conc.M), 2),
+            SD = round(sd(Conc.M), 2),
+            N = n()) %>% 
+  arrange(desc(M)) %>% print(n = Inf)
+```
+
+Make a model of this (-able is reference category):
+
+```{r}
+summary(lm(Conc.M ~ Suffix, data = conc_morph))
+summary(lm(Conc.M ~ Suffix, data = conc_morph))$r.squared
+```
+
+Significant effect, explains 41% of the variance. The effect is pretty strong.
+
+Do the same for low SD:
+
+```{r}
+summary(lm(Conc.M ~ Suffix,
+           data = filter(conc_sub,
+                         Suffix != '-est',
+                         IsCompound != 'Compound')))
+summary(lm(Conc.M ~ Suffix,
+           data = filter(conc_sub,
+                         Suffix != '-est',
+                         IsCompound != 'Compound')))$r.squared
+```
+
+Even stronger, 59%.
+
+Make a plot of this, including monomorphemics:
+
+```{r, fig.width = 10, fig.height = 6}
+# Plot and aesthetics:
+
+conc_suffix <- conc %>% 
+  filter(SuffixWithMono != '-est',
+         !is.na(SuffixWithMono)) %>% 
+  filter(IsCompound != 'Compound') %>% 
+  mutate(SuffixWithMono = ifelse(SuffixWithMono == 'monomorphemic',
+                                 'mono.', SuffixWithMono)) %>% 
+  ggplot(aes(x = reorder(SuffixWithMono, Conc.M), y = Conc.M))
+
+# Geoms:
+
+conc_suffix <- conc_suffix + geom_boxplot(fill = 'steelblue')
+
+# Themes and other properties:
+    
+conc_suffix <- conc_suffix + 
+  labs(x = '', y = 'Concreteness\n') +
+  theme_timo +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1,
+                                   face = 'bold', size = 14))
+
+# Look and save:
+    
+conc_suffix
+
+ggsave(plot = conc_suffix, filename = '../figures/suffixes.pdf',
+       width = 12, height = 4.5)
+```
+
+Make a plot of morpheme count:
+
+```{r, fig.width = 10, fig.height = 6}
+# Plot and aesthetics:
+
+conc_NMorph <- conc %>% 
+  filter(!is.na(NMorph)) %>% 
+  filter(IsCompound != 'Compound') %>% 
+  ggplot(aes(x = factor(NMorph), y = Conc.M,
+                    fill = factor(NMorph)))
+
+# Geoms:
+
+conc_NMorph <- conc_NMorph + geom_boxplot()
+
+# Themes and other properties:
+    
+conc_NMorph <- conc_NMorph + 
+  labs(x = '\nNumber of morphemes', y = 'Concreteness\n') +
+  scale_fill_brewer(palette = 'Greens') +
+  theme_timo +
+  theme(legend.position = 'none')
+
+# Look and save:
+    
+conc_NMorph
+
+ggsave(plot = conc_NMorph, filename = '../figures/morpheme_count.pdf',
+       width = 8, height = 4.5)
+```
+
+Words with fewer morphemes definitely more likely to be abstract (low concreteness)!
+
+Descriptive values for reporting:
+
+```{r}
+conc %>% group_by(NMorph) %>%
+  filter(IsCompound != 'Compound') %>% 
+  summarize(M = round(mean(Conc.M), 2),
+            SD = round(sd(Conc.M), 2),
+            N = n()) %>%
+  filter(!is.na(NMorph))
+```
+
+Make a model of this:
+
+```{r}
+summary(lm(Conc.M ~ NMorph,
+           data = filter(conc, IsCompound != 'Compound')))
+summary(lm(Conc.M ~ NMorph,
+           data = filter(conc, IsCompound != 'Compound')))$r.squared
+```
+
+Significant effect, explains 24% of the variance. The effect is pretty strong. The coefficient says that for each morpheme, the average concreteness scale is predicted to be lower by half a concreteness point (-0.5). So for two morphemes, you tend to loose a complete concreteness point.
+
+Same for low SD:
+
+Make a model of this:
+
+```{r}
+summary(lm(Conc.M ~ NMorph,
+           data = filter(conc_sub, IsCompound != 'Compound')))
+summary(lm(Conc.M ~ NMorph,
+           data = filter(conc_sub, IsCompound != 'Compound')))$r.squared
+```
+
+Here's an attempt:
+
+```{r}
+xmdl <- lm(Conc.M ~ NMorph + NPhon,
+           data = filter(conc, IsCompound != 'Compound'))
+summary(xmdl)
+summary(xmdl)$r.squared
+
+# Check variance inflation factors to assess collinearity:
+
+vif(xmdl)
+```
+
+Adding number of phonemes means that the number of morpheme predictor is still significant... although it is slightly weaker. Adding number of phonemes only increases the variance explained by 19%.
+
+Variance inflation factors indicate no collinearity issues.
+
+Check the number of morphemes now for the low SD subset:
+
+```{r}
+# Pure model:
+
+xmdl <- lm(Conc.M ~ NMorph, conc_sub)
+summary(xmdl)
+summary(xmdl)$r.squared
+
+# With word length control:
+
+xmdl <- lm(Conc.M ~ NMorph + NPhon, conc_sub)
+summary(xmdl)
+summary(xmdl)$r.squared
+```
+
+Significant effects, 20% and 22% of the variance explained.
+
+Descriptive values for reporting of the low SD set:
+
+```{r}
+conc_sub %>% group_by(NMorph) %>%
+  summarize(M = round(mean(Conc.M), 2),
+            SD = round(sd(Conc.M), 2),
+            N = n()) %>%
+  filter(!is.na(NMorph))
+```
+
+There's only three six-morphemic words, so basically not even worth mentioning.
+
+## Linguistic factor 3: Countability:
+
+Needs to be at the lemma level. Let's make a table of "major_class" by lemma:
+
+```{r}
+BECL_tab <- with(BECL, table(lemma, major_class))
+head(BECL_tab) # first six rows
+```
+
+Let's get those that are ONLY count or ONLY noun:
+
+```{r}
+colnames(BECL_tab)
+
+# Count nouns:
+
+count_only <- BECL_tab[BECL_tab[, 3] >= 1, ]
+count_only <- count_only[count_only[, 1] == 0, ]
+count_only <- count_only[count_only[, 2] == 0, ] 
+count_only <- count_only[count_only[, 4] == 0, ] 
+
+# Mass nouns:
+
+mass_only <- BECL_tab[BECL_tab[, 4] >= 1, ]
+mass_only <- mass_only[mass_only[, 1] == 0, ]
+mass_only <- mass_only[mass_only[, 2] == 0, ] 
+mass_only <- mass_only[mass_only[, 3] == 0, ]
+
+# Extract the actual words:
+
+mass_only <- row.names(mass_only)
+count_only <- row.names(count_only)
+```
+
+In the "conc" data frame, use these word vectors to label the words accordingly:
+
+```{r}
+conc <- mutate(conc, MassCount = ifelse(Word %in% mass_only, 'mass', NA),
+               MassCount = ifelse(Word %in% count_only, 'count', MassCount))
+
+# Low SD set:
+
+conc_sub <- mutate(conc_sub, MassCount = ifelse(Word %in% mass_only, 'mass', NA),
+               MassCount = ifelse(Word %in% count_only, 'count', MassCount))
+```
+
+Check how many there are:
+
+```{r}
+table(conc$MassCount)
+prop.table(table(conc$MassCount))
+
+# Low SD set:
+
+table(conc_sub$MassCount)
+prop.table(table(conc_sub$MassCount))
+```
+
+80% count (N = 3699), and 20% mass (N = 918); very similar proportions for the low SD set.
+
+Make a plot of this:
+
+```{r, fig.width = 8, fig.height = 6}
+# Plot and aesthetics:
+
+conc_MassCount <- conc %>% filter(!is.na(MassCount)) %>%
+  mutate(MassCount = factor(MassCount, levels = c('mass', 'count'))) %>% 
+  ggplot(aes(x = MassCount, fill = MassCount, y = Conc.M))
+
+# Geoms:
+
+conc_MassCount <- conc_MassCount +
+  geom_boxplot()
+
+# Themes and other properties:
+
+conc_MassCount <- conc_MassCount +
+  labs(y = 'Concreteness\n', x = '') + 
+  scale_fill_brewer(palette = 'Accent') +
+  theme_timo +
+  theme(legend.position = 'none')
+
+# Look and save:
+
+conc_MassCount
+
+ggsave(plot = conc_MassCount, filename = '../figures/masscount.pdf',
+       width = 6, height = 4.5)
+```
+
+Looks like mass is much more abstract. Descriptive values for comparison:
+
+```{r}
+conc %>% group_by(MassCount) %>%
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            N = n()) %>%
+  filter(!is.na(MassCount))
+
+# Same for low SD:
+
+conc_sub %>% group_by(MassCount) %>%
+  summarize(M = mean(Conc.M),
+            SD = sd(Conc.M),
+            N = n()) %>%
+  filter(!is.na(MassCount))
+```
+
+Let's make a model of this:
+
+```{r}
+with(conc, t.test(Conc.M ~ MassCount, var.equal = TRUE))
+with(conc, cohen.d(Conc.M ~ MassCount, var.equal = TRUE))
+with(conc, summary(lm(Conc.M ~ MassCount, ))$r.squared)
+
+# Low SD:
+
+with(conc_sub, t.test(Conc.M ~ MassCount, var.equal = TRUE))
+with(conc_sub, cohen.d(Conc.M ~ MassCount, var.equal = TRUE))
+with(conc_sub, summary(lm(Conc.M ~ MassCount))$r.squared)
+```
+
+Yep, and explains 14% of the variance, 19% for the low SD words.
+
+## Factor 4: Etymology
+
+For how many of the words do we have etymological information?
+
+```{r}
+sum(!is.na(conc$Etym))
+sum(is.na(conc$Etym))
+```
+
+Are mass nouns more likely to be French origin?
+
+```{r}
+xtab <- with(conc, table(MassCount, EtymSimplified))
+chisq.test(xtab)
+```
+
+This significance test tests for an uneven distribution of mass/count labels across French/English and other words. We can look at the standardized residuals...
+
+```{r}
+chisq.test(xtab)$stdres
+```
+
+... which show that French words are over-represented for mass nouns, and English words over-represented for count nouns.
+
+What about morphological complexity? First, descriptive stats:
+
+```{r}
+conc %>% group_by(EtymSimplified) %>% 
+  summarize(M = mean(NMorph, na.rm = TRUE)) %>% 
+  filter(!is.na(EtymSimplified)) %>% 
+  arrange(desc(M))
+```
+
+Descriptive stats of concreteness:
+
+```{r}
+conc %>% group_by(EtymSimplified) %>% 
+  summarize(M = mean(Conc.M, na.rm = TRUE),
+            SD = sd(Conc.M, na.rm = TRUE)) %>% 
+  filter(!is.na(EtymSimplified)) %>% 
+  arrange(desc(M))
+```
+
+Let's make a Poisson model of this:
+
+```{r}
+nmorph_mdl <- glm(NMorph ~ EtymSimplified,
+                  data = conc, family = 'poisson')
+summary(nmorph_mdl)
+anova(nmorph_mdl, test = 'Chisq')
+```
+
+Make a model out of this:
+
+```{r}
+etym_mdl <- lm(Conc.M ~ EtymSimplified, data = conc)
+summary(etym_mdl)
+
+etym_sub_mdl <- lm(Conc.M ~ EtymSimplified, data = conc_sub)
+summary(etym_sub_mdl)
+```
+
+Make a graph:
+
+```{r, fig.width = 8, fig.height = 6}
+# Plot and aesthetics:
+
+etym_p <- conc %>%
+  filter(EtymSize == 'large') %>%
+  ggplot(aes(x = EtymSimplified, fill = EtymSimplified, y = Conc.M))
+
+# Geoms:
+
+etym_p <- etym_p +
+  geom_boxplot()
+
+# Themes and other properties:
+  
+etym_p <- etym_p +
+  labs(x = '', y = 'Concreteness\n') +
+  scale_fill_brewer(palette = 'Accent') + 
+  theme_timo +
+  theme(legend.position = 'none')
+  
+
+# Look and save:
+
+etym_p
+
+ggsave(plot = etym_p, filename = '../figures/etymology.pdf',
+       width = 6, height = 4.5)
+
+```
+
+## Simultaneous analysis
+
+Put everything into one regression model, with count and mass nouns treated as separate words:
+
+```{r}
+conc$SUBTL_POS2 <- conc$SUBTL_POS
+conc[which(conc$MassCount == 'mass'), ]$SUBTL_POS2 <- 'mass noun'
+conc[which(conc$MassCount == 'count'), ]$SUBTL_POS2 <- 'count noun'
+conc_red <- filter(conc,
+                   SUBTL_POS2 != 'Noun')
+```
+
+Do the same thing for the low-SD set:
+
+```{r}
+conc_sub$SUBTL_POS2 <- conc_sub$SUBTL_POS
+conc_sub[which(conc_sub$MassCount == 'mass'), ]$SUBTL_POS2 <- 'mass noun'
+conc_sub[which(conc_sub$MassCount == 'count'), ]$SUBTL_POS2 <- 'count noun'
+conc_sub_red <- filter(conc_sub,
+                       SUBTL_POS2 != 'Noun')
+```
+
+Get a subset that has only those 
+
+Run a model:
+
+```{r}
+full_mdl <- lm(Conc.M ~ SUBTL_POS2 + NMorph + EtymSimplified,
+               data = filter(conc_red, IsCompound != 'Compound'))
+summary(full_mdl)$r.squared # full model
+anova(full_mdl)# significant effects of everything
+```
+
+Get the unique contributions against the full model:
+
+```{r}
+mdl_no_SUBTL <- lm(Conc.M ~ NMorph + EtymSimplified,
+               data = filter(conc_red, IsCompound != 'Compound'))
+mdl_no_morph <- lm(Conc.M ~ SUBTL_POS2 + EtymSimplified,
+               data = filter(conc_red, IsCompound != 'Compound'))
+mdl_no_etym <- lm(Conc.M ~ SUBTL_POS2 + NMorph,
+               data = filter(conc_red, IsCompound != 'Compound'))
+
+# r-squareds:
+
+rsq_all <- summary(full_mdl)$r.squared
+rsq_all - summary(mdl_no_SUBTL)$r.squared
+rsq_all - summary(mdl_no_morph)$r.squared
+rsq_all - summary(mdl_no_etym)$r.squared
+```
+
+Partial r-squared:
+
+```{r}
+rsq.partial(full_mdl)
+```
+
+Similar picture.
+
+Run a model on the low-SD data::
+
+```{r}
+sub_mdl <- lm(Conc.M ~ SUBTL_POS2 + NMorph + EtymSimplified,
+              data = filter(conc_sub_red, IsCompound != 'Compound'))
+summary(sub_mdl)$r.squared # full model
+anova(sub_mdl)# significant effects of everything
+```
+
+Low-SD partial R-squareds:
+
+```{r}
+rsq.partial(sub_mdl)
+```
+
+Overall, this model explains 36% of the variance in concreteness ratings.
+
+Check variance inflation factors:
+
+```{r}
+vif(full_mdl)
+```
+
+Absolutely no collinearity worthy of mentioning.
+
+Do the same thing for the low SD words:
+
+```{r}
+conc_red <- filter(conc_sub, SUBTL_POS %in% POS)
+full_mdl_sub <- lm(Conc.M ~ NMorph + SUBTL_POS + EtymSimplified,
+                   data = conc_red)
+anova(full_mdl_sub)# significant effects of everything
+summary(full_mdl_sub)
+```
+
+Explains 27% of the total variance for the low SD model.
+
+## Subset analysis for high-and low concreteness words:
+
+Check whether linguistic factors explain results better for high or low abstractness words:
+
+```{r}
+conc_red_highC <- filter(conc_red, Conc.M > median(Conc.M))
+conc_red_lowC <- filter(conc_red, Conc.M < median(Conc.M))
+```
+
+The corresponding models:
+
+```{r}
+full_highC <- lm(Conc.M ~ SUBTL_POS + NMorph + EtymSimplified,
+                 data = conc_red_highC)
+full_lowC <- lm(Conc.M ~ SUBTL_POS + NMorph + EtymSimplified,
+                data = conc_red_lowC)
+anova(full_highC)
+anova(full_lowC)
+
+summary(full_highC)$r.squared
+summary(full_lowC)$r.squared
+```
+
+
+## Calculate unique R-squared for all things:
+
+Loop through predictors and drop them to look at how much variance they contribute. First, create tibbles where there's no missingness:
+
+```{r}
+nomiss <- filter(conc,
+                 !is.na(SUBTL_POS),
+                 !is.na(NMorph),
+                 !is.na(EtymSimplified))
+nomiss_sub <- filter(conc_sub,
+                     !is.na(SUBTL_POS),
+                     !is.na(NMorph),
+                     !is.na(EtymSimplified))
+```
+
+Create a vector with all the predictors:
+
+```{r}
+preds <- c('SUBTL_POS', 'NMorph', 'EtymSimplified')
+```
+
+Create tables to append the different R-squared values to:
+
+```{r}
+rsq <- tibble(preds, RSQ = NA, RSQ_sub = NA) %>% 
+  mutate(RSQ = as.numeric(RSQ),
+         RSQ_sub = as.numeric(RSQ_sub))
+```
+
+Then, loop through all the models and drop one of the terms:
+
+```{r}
+for (i in seq_along(preds)) {
+  myFormula <- str_c(preds[-i], collapse = ' + ')
+  myFormula <- str_c('Conc.M ~ ', myFormula)
+  rsq[i, ]$RSQ <- glance(lm(myFormula, data = nomiss))$r.squared
+  rsq[i, ]$RSQ_sub <- glance(lm(myFormula, data = nomiss_sub))$r.squared
+}
+```
+
+Calculate the R-squared differences:
+
+```{r}
+rsq <- mutate(rsq,
+              RSQ_diff = glance(full_mdl)$r.squared - RSQ,
+              RSQ_sub_diff = glance(full_mdl_sub)$r.squared - RSQ_sub)
+rsq
+```
+
+Visualization of the R-squared values:
+
+```{r, fig.width = 12, fig.height = 6}
+rsq %>%
+  ggplot(aes(x = preds, y = RSQ_sub_diff, fill = preds)) +
+  geom_bar(stat = 'identity') +
+  theme_timo +
+  scale_fill_brewer(palette = 'Accent') +
+  ggtitle('R-Squared by predictor')
+ggsave('../figures/r_squared.pdf', width = 8, height = 4.5)
+```
+
+## Do this analysis for nouns only:
+
+Here we can add mass/count and specificity as predictors:
+
+```{r}
+nouns <- filter(conc, SUBTL_POS == 'Noun')
+noun_mdl <- lm(Conc.M ~ NMorph + MassCount + EtymSimplified, data = nouns)
+anova(noun_mdl)
+summary(noun_mdl)
+```
+
+Same for reduced data frame:
+
+```{r}
+noun_sub <- filter(conc_sub, SUBTL_POS == 'Noun')
+noun_sub_mdl <- lm(Conc.M ~ NMorph + MassCount + EtymSimplified,
+                   data = noun_sub)
+anova(noun_sub_mdl)
+summary(noun_sub_mdl)
+```
+
+Get data frames:
+
+```{r}
+nomiss_noun <- filter(conc,
+                 SUBTL_POS == 'Noun',
+                 !is.na(NMorph),
+                 !is.na(MassCount),
+                 !is.na(EtymSimplified))
+nomiss_noun_sub <- filter(conc_sub,
+                 SUBTL_POS == 'Noun',
+                 !is.na(NMorph),
+                 !is.na(MassCount),
+                 !is.na(EtymSimplified))
+```
+
+Create a vector with all the predictors:
+
+```{r}
+preds <- c('MassCount', 'NMorph', 'EtymSimplified')
+```
+
+Create tables to append the different R-squared values to:
+
+```{r}
+rsq_nouns <- tibble(preds, RSQ = NA, RSQ_sub = NA) %>% 
+  mutate(RSQ = as.numeric(RSQ),
+         RSQ_sub = as.numeric(RSQ_sub))
+```
+
+Then, loop through all the models and drop one of the terms:
+
+```{r}
+for (i in seq_along(preds)) {
+  myFormula <- str_c(preds[-i], collapse = ' + ')
+  myFormula <- str_c('Conc.M ~ ', myFormula)
+  rsq_nouns[i, ]$RSQ <- glance(lm(myFormula, data = nomiss_noun))$r.squared
+  rsq_nouns[i, ]$RSQ_sub <- glance(lm(myFormula, data = nomiss_noun_sub))$r.squared
+}
+```
+
+Calculate the R-squared differences:
+
+```{r}
+rsq_nouns <- mutate(rsq_nouns,
+              RSQ_diff = glance(noun_mdl)$r.squared - RSQ,
+              RSQ_sub_diff = glance(noun_sub_mdl)$r.squared - RSQ_sub)
+rsq_nouns
+```
+
+Visualization of the R-squared values:
+
+```{r, fig.width = 12, fig.height = 6}
+rsq_nouns %>%
+  ggplot(aes(x = preds, y = RSQ_sub_diff, fill = preds)) +
+  geom_bar(stat = 'identity') +
+  theme_timo +
+  scale_fill_brewer(palette = 'Accent') +
+  ggtitle('R-Squared by predictor')
+```
+
+This completes this analysis.
