@@ -1,6 +1,6 @@
 ---
 title: "Linguistic Predictors of Concreteness"
-author: "Bodo Winter"
+author: "anonymous"
 date: "3/26/2019"
 output: html_document
 ---
@@ -159,7 +159,7 @@ conc <- mutate(conc,
                EtymSimplified = ifelse(Etym %in% other, 'Other', EtymSimplified))
 ```
 
-In a further step — this was requested by Francesca & Marianna, we will merge "Other" and "English", as the hypothesis is about French-based versus the rest.
+In a further step — we will merge "Other" and "English", as the hypothesis is about French-based versus the rest.
 
 ```{r}
 conc <- mutate(conc,
@@ -167,15 +167,16 @@ conc <- mutate(conc,
                                        'Other', EtymSimplified))
 ```
 
-Create a new 'function word' category:
+Create a new 'function word' category. Comment out 'pronoun' category if this is supposed to be excluded from function words.
 
 ```{r}
 function_words <- c('Conjunction', 'Determiner',
-                    'Preposition', 'Pronoun', 'Article',
+                    'Preposition', 'Article',
+                    'Pronoun',
                     'Ex', 'To', 'Not')
 conc <- mutate(conc,
                SUBTL_POS = ifelse(SUBTL_POS %in% function_words,
-                                  'Function', SUBTL_POS))
+                                   'Function', SUBTL_POS))
 rm(function_words)
 ```
 
@@ -274,7 +275,6 @@ conc <- filter(conc, Percent_known > 0.95)
 
 A whopping 21% are excluded... or alternatively, 5820 data points.
 
-
 Get all compounds:
 
 ```{r, message = FALSE, warning = FALSE}
@@ -294,7 +294,8 @@ Add a "is compound" variable to the conc data frame:
 
 ```{r}
 conc <- mutate(conc,
-               IsCompound = ifelse(Word %in% compounds, 'Compound', 'No compound'))
+               IsCompound = ifelse(Word %in% compounds,
+                                   'Compound', 'No compound'))
 ```
 
 Crete a subset with low SD items. Here I use an 50th percentile cut-off (median split), so the words with the 50% lowest SD. Other values would make sense too (feel free to change them) and don't affect the results vastly:
@@ -380,7 +381,7 @@ anova(xmdl)
 summary(xmdl)$r.squared
 ```
 
-Also significant, explains 32% of the variance.
+Also significant, explains 41% of the variance.
 
 Get the descriptive values for low SD words:
 
@@ -392,97 +393,6 @@ conc_red %>% group_by(SUBTL_POS) %>%
 ```
 
 Basically the same pattern as before, but even more pronounced.
-
-Analysis of elastic words. First, check what elastic nouns there are most of, only for those that have at most two POS elasticity and at least 50 instances:
-
-```{r}
-conc %>% count(SUBTL_allPOS, sort = TRUE) %>%
-  filter(!is.na(SUBTL_allPOS)) %>% 
-  filter(str_count(SUBTL_allPOS, '\\.') == 1) %>% 
-  filter(n > 50) %>% 
-  print(n= Inf)
-```
-
-Recode them:
-
-```{r}
-conc <- mutate(conc,
-               Elasticity = ifelse(SUBTL_allPOS == 'Verb.Noun',
-                                   'Noun.Verb', SUBTL_allPOS),
-               Elasticity = ifelse(SUBTL_allPOS == 'Adjective.Noun',
-                                   'Noun.Adjective', Elasticity),
-               Elasticity = ifelse(SUBTL_allPOS == 'Adjective.Adverb',
-                                   'Adverb.Adjective', Elasticity),
-               Elasticity = ifelse(SUBTL_allPOS == 'Verb.Adjective',
-                                   'Adjective.Verb', Elasticity))
-```
-
-Extract elastics and non-elastics:
-
-```{r}
-elastics <- filter(conc,
-                   Elasticity %in% c('Noun.Verb', 'Noun.Adjective',
-                                     'Adverb.Adjective', 'Adjective.Verb',
-                                     'Noun', 'Adjective', 'Verb', 'Adverb'))
-```
-
-Get the averages:
-
-```{r}
-elastics %>% group_by(Elasticity) %>% 
-  summarize(M = mean(Conc.M),
-            SD = sd(Conc.M)) %>% 
-  arrange(desc(M))
-```
-
-No clear tendency.
-
-Code percentage into continuous variable:
-
-```{r}
-conc <- mutate(conc,
-               SUBTL_percent = as.numeric(SUBTL_percent))
-```
-
-First, get the noun/verb ones, then the others etc.
-
-```{r}
-NV <- filter(conc,
-             SUBTL_allPOS %in% c('Noun.Verb', 'Verb.Noun'))
-AN <- filter(conc,
-             SUBTL_allPOS %in% c('Noun.Adjective', 'Adjective.Noun'))
-AV <- filter(conc,
-             SUBTL_allPOS %in% c('Verb.Adjective', 'Adjective.Verb'))
-AA <- filter(conc,
-             SUBTL_allPOS %in% c('Adjective.Adverb', 'Adverb.Adjective'))
-```
-
-Code them all so that the percentage is with respect to the more concrete category:
-
-```{r}
-NV[NV$SUBTL_allPOS == 'Verb.Noun', ]$SUBTL_percent <- 1 -
-  NV[NV$SUBTL_allPOS == 'Verb.Noun', ]$SUBTL_percent
-
-AN[AN$SUBTL_allPOS == 'Adjective.Noun', ]$SUBTL_percent <- 1 -
-  AN[AN$SUBTL_allPOS == 'Adjective.Noun', ]$SUBTL_percent
-
-AV[AV$SUBTL_allPOS == 'Adjective.Verb', ]$SUBTL_percent <- 1 -
-  AV[AV$SUBTL_allPOS == 'Adjective.Verb', ]$SUBTL_percent
-
-AA[AA$SUBTL_allPOS == 'Adverb.Adjective', ]$SUBTL_percent <- 1 -
-  AA[AA$SUBTL_allPOS == 'Adverb.Adjective', ]$SUBTL_percent
-```
-
-Assess this:
-
-```{r}
-with(NV, cor.test(SUBTL_percent, Conc.M))
-with(AN, cor.test(SUBTL_percent, Conc.M))
-with(AV, cor.test(SUBTL_percent, Conc.M))
-with(AA, cor.test(SUBTL_percent, Conc.M))
-```
-
-No clear pattern of results. It's not 100% clear what to make of the elasticity results.
 
 ## Linguistic factor 2: Number of morphemes:
 
@@ -527,13 +437,12 @@ with(conc_comp, cohen.d(Conc.M ~ IsCompound, var.equal = TRUE))
 
 There are two ways of looking at morphological complexity. One is to look at specific suffixes (Table 1 in the paper).
 
-Get those from the database and exclude "-est", which is inflectional anyway and has such low numbers because of the lemmatization:
+Get those from the database:
 
 ```{r}
 conc_morph <- filter(conc,
                      IsCompound != 'Compound',
                      NMorph <= 2)
-conc_morph <- conc_morph[-which(conc_morph$Suffix == '-est'), ]
 ```
 
 What about the suffix versus no suffix variable?
@@ -547,6 +456,7 @@ conc_morph %>%
 
 with(conc_morph, t.test(Conc.M ~ HasSuffix, var.equal = TRUE))
 with(conc_morph, cohen.d(Conc.M ~ HasSuffix, var.equal = TRUE))
+with(conc_morph, glance(lm(Conc.M ~ HasSuffix))$r.squared)
 ```
 
 Same for low SD dataset (-est does not occur in the low SD dataset):
@@ -560,6 +470,7 @@ conc_sub %>%
 
 with(conc_sub, t.test(Conc.M ~ HasSuffix))
 with(conc_sub, cohen.d(Conc.M ~ HasSuffix))
+with(conc_sub, glance(lm(Conc.M ~ HasSuffix))$r.squared)
 ```
 
 Descriptive values for reporting (NA is monomorphemic here):
@@ -586,11 +497,9 @@ Do the same for low SD:
 ```{r}
 summary(lm(Conc.M ~ Suffix,
            data = filter(conc_sub,
-                         Suffix != '-est',
                          IsCompound != 'Compound')))
 summary(lm(Conc.M ~ Suffix,
            data = filter(conc_sub,
-                         Suffix != '-est',
                          IsCompound != 'Compound')))$r.squared
 ```
 
@@ -602,8 +511,7 @@ Make a plot of this, including monomorphemics:
 # Plot and aesthetics:
 
 conc_suffix <- conc %>% 
-  filter(SuffixWithMono != '-est',
-         !is.na(SuffixWithMono)) %>% 
+  filter(!is.na(SuffixWithMono)) %>% 
   filter(IsCompound != 'Compound') %>% 
   mutate(SuffixWithMono = ifelse(SuffixWithMono == 'monomorphemic',
                                  'mono.', SuffixWithMono)) %>% 
@@ -1223,4 +1131,25 @@ rsq_nouns %>%
   ggtitle('R-Squared by predictor')
 ```
 
+## Are adverbs more concrete?
+
+The adverb result is a bit unexpected. Why could this be?
+
+```{r}
+conc$LogFreq <- log10(ELP[match(conc$Lemmas, ELP$Word), ]$Freq_N + 1)
+```
+
+Check:
+
+```{r}
+conc %>% group_by(SUBTL_POS) %>% 
+  summarize(LogFreq = mean(LogFreq, na.rm = TRUE))
+```
+
+
+
+
 This completes this analysis.
+
+
+
